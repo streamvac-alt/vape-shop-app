@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vape Shop</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f9f9f9;
+      padding: 12px;
+      color: #333;
+    }
+    .search-box input {
+      width: 100%; padding: 10px 16px; border: 1px solid #ccc; border-radius: 24px; font-size: 16px; outline: none; margin-bottom: 16px;
+    }
+    .tabs { display: flex; gap: 8px; margin-bottom: 16px; overflow-x: auto; }
+    .tab { background: #e0e0e0; border: none; padding: 8px 16px; border-radius: 20px; white-space: nowrap; cursor: pointer; }
+    .tab.active { background: #0088cc; color: white; }
+    .subtabs { display: flex; gap: 6px; margin: 12px 0; overflow-x: auto; }
+    .subtab { background: #d0d0d0; border: none; padding: 6px 12px; border-radius: 16px; font-size: 14px; white-space: nowrap; cursor: pointer; }
+    .subtab.active { background: #0088cc; color: white; }
+    .product-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+    .product { background: white; border-radius: 12px; padding: 10px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+    .product img { width: 100%; aspect-ratio: 1/1; object-fit: cover; border-radius: 8px; margin-bottom: 8px; }
+    .product-name { font-size: 14px; font-weight: 600; margin: 4px 0; }
+    .product-price { font-size: 14px; color: #0088cc; margin-bottom: 4px; }
+    .product-stock { font-size: 12px; color: #666; margin-bottom: 6px; }
+    .btn { background: #0088cc; color: white; border: none; padding: 6px 0; border-radius: 6px; font-size: 13px; cursor: pointer; width: 100%; }
+    .btn.out-of-stock { background: #ccc; cursor: not-allowed; }
+    .cart-btn {
+      position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+      background: #ff5722; color: white; border: none; width: 90%; padding: 12px;
+      border-radius: 50px; font-size: 16px; font-weight: bold; cursor: pointer;
+      box-shadow: 0 4px 12px rgba(255,87,34,0.3); display: none;
+    }
+    .cart-btn.show { display: block; }
+    .back-btn { margin-bottom: 12px; background: #666; color: white; border: none; padding: 8px 16px; border-radius: 20px; cursor: pointer; }
+    #loading { text-align: center; padding: 40px; color: #666; }
+  </style>
+</head>
+<body>
+  <div id="loading">Загрузка каталога...</div>
+
+  <div id="screen-home" style="display:none;">
+    <div class="search-box">
+      <input type="text" id="search-input" placeholder="Поиск по названию..." oninput="handleSearch()">
+    </div>
+    <div class="tabs">
+      <button class="tab active" data-tab="liquids">Жидкости</button>
+      <button class="tab" data-tab="hardware">Железо</button>
+    </div>
+    <div id="subtabs-liquids" class="subtabs"></div>
+    <div id="subtabs-hardware" class="subtabs" style="display:none;"></div>
+    <div class="product-grid" id="products-container"></div>
+  </div>
+
+  <div id="screen-search" style="display:none;">
+    <button class="back-btn" onclick="exitSearch()">← Назад к категориям</button>
+    <div class="search-box">
+      <input type="text" id="search-input-top" placeholder="Поиск..." oninput="handleSearch()" value="">
+    </div>
+    <div class="product-grid" id="search-results"></div>
+  </div>
+
+  <div id="screen-cart" style="display:none;">
+    <button class="back-btn" onclick="showScreen('home')">← Назад к товарам</button>
+    <h3>Ваша корзина</h3>
+    <div id="cart-items"></div>
+    <div style="margin-top: 12px; font-weight: bold;">Итого: <span id="cart-total">0</span> BYN</div>
+    <button class="btn" style="background:#4caf50; margin-top:12px;" onclick="sendOrder()">Оформить заказ</button>
+  </div>
+
+  <button class="cart-btn" id="cart-btn" onclick="showScreen('cart')">Корзина: <span id="cart-count">0</span></button>
+
+  <script>
+    // ↓↓↓ НАСТРОЙКИ — ЗАМЕНИ ПЕРЕД ПРОДАЖЕЙ ↓↓↓
+    const BOT_TOKEN = "8566238436:AAExiDppK_F36dSHcCYUJ_sVo2NBhZumz44 "; // ← клиент даёт свой
+    const YOUR_CHAT_ID = 660436506; // ← по умолчанию твой, но клиент заменит на свой
+    const DATA_URL = "https://vape-shop-data.vercel.app/db.json"; // ← твой URL
+    // ↑↑↑ НАСТРОЙКИ — ЗАМЕНИ ПЕРЕД ПРОДАЖЕЙ ↑↑↑
+
+    let allProducts = [];
+    let currentCategory = 'liquids';
+    let isSearchMode = false;
+    let cart = JSON.parse(localStorage.getItem('cart')) || [];
+
+    async function loadProducts() {
+      try {
+        const res = await fetch(DATA_URL + "?t=" + Date.now());
+        const data = await res.json();
+        allProducts = data.products || [];
+        showScreen('home');
+        renderProducts();
+        updateCartUI();
+      } catch (e) {
+        document.getElementById('loading').innerHTML = '❌ Ошибка загрузки каталога';
+        console.error(e);
+      }
+    }
+
+    function showScreen(screen) {
+      document.getElementById('loading').style.display = 'none';
+      document.querySelectorAll('[id^="screen-"]').forEach(el => el.style.display = 'none');
+      document.getElementById(`screen-${screen}`).style.display = 'block';
+      isSearchMode = (screen === 'search');
+    }
+
+    function renderProducts() {
+      if (isSearchMode) return;
+      const products = allProducts.filter(p => p.category === currentCategory);
+      const brands = [...new Set(products.map(p => p.brand))];
+      
+      const subtabsEl = currentCategory === 'liquids' 
+        ? document.getElementById('subtabs-liquids')
+        : document.getElementById('subtabs-hardware');
+      
+      subtabsEl.innerHTML = '<button class="subtab active" onclick="filterByBrand(null)">Все</button>';
+      brands.forEach(brand => {
+        const btn = document.createElement('button');
+        btn.className = 'subtab';
+        btn.textContent = brand?.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase()) || brand;
+        btn.onclick = () => filterByBrand(brand);
+        subtabsEl.appendChild(btn);
+      });
+      document.getElementById('subtabs-liquids').style.display = currentCategory === 'liquids' ? 'flex' : 'none';
+      document.getElementById('subtabs-hardware').style.display = currentCategory === 'hardware' ? 'flex' : 'none';
+
+      const container = document.getElementById('products-container');
+      container.innerHTML = products.map(p => `
+        <div class="product">
+          <img src="${p.image || ''}" alt="${p.name}" onerror="this.style.display='none'">
+          <div class="product-name">${p.name}</div>
+          <div class="product-price">${parseFloat(p.price).toFixed(2)} BYN</div>
+          <div class="product-stock">Остаток: ${p.stock || 0}</div>
+          <button class="btn ${(!p.stock || p.stock <= 0) ? 'out-of-stock' : ''}" 
+                  onclick="addToCart('${p.id || Date.now()}')" 
+                  ${(!p.stock || p.stock <= 0) ? 'disabled' : ''}>
+            ${(!p.stock || p.stock <= 0) ? 'Нет в наличии' : 'В корзину'}
+          </button>
+        </div>
+      `).join('');
+    }
+
+    function filterByBrand(brand) {
+      document.querySelectorAll('.subtab').forEach(b => b.classList.remove('active'));
+      event.target.classList.add('active');
+      const container = document.getElementById('products-container');
+      const products = brand 
+        ? allProducts.filter(p => p.category === currentCategory && p.brand === brand)
+        : allProducts.filter(p => p.category === currentCategory);
+      container.innerHTML = products.map(p => `
+        <div class="product">
+          <img src="${p.image || ''}" alt="${p.name}" onerror="this.style.display='none'">
+          <div class="product-name">${p.name}</div>
+          <div class="product-price">${parseFloat(p.price).toFixed(2)} BYN</div>
+          <div class="product-stock">Остаток: ${p.stock || 0}</div>
+          <button class="btn ${(!p.stock || p.stock <= 0) ? 'out-of-stock' : ''}" 
+                  onclick="addToCart('${p.id || Date.now()}')" 
+                  ${(!p.stock || p.stock <= 0) ? 'disabled' : ''}>
+            ${(!p.stock || p.stock <= 0) ? 'Нет в наличии' : 'В корзину'}
+          </button>
+        </div>
+      `).join('');
+    }
+
+    function handleSearch() {
+      const query = (document.getElementById('search-input').value || document.getElementById('search-input-top').value).toLowerCase().trim();
+      if (!query) return showScreen('home');
+      showScreen('search');
+      document.getElementById('search-input-top').value = query;
+      const results = allProducts.filter(p => p.name.toLowerCase().includes(query));
+      document.getElementById('search-results').innerHTML = results.length
+        ? results.map(p => `
+            <div class="product">
+              <img src="${p.image || ''}" alt="${p.name}" onerror="this.style.display='none'">
+              <div class="product-name">${p.name}</div>
+              <div class="product-price">${parseFloat(p.price).toFixed(2)} BYN</div>
+              <div class="product-stock">Остаток: ${p.stock || 0}</div>
+              <button class="btn ${(!p.stock || p.stock <= 0) ? 'out-of-stock' : ''}" 
+                      onclick="addToCart('${p.id || Date.now()}')" 
+                      ${(!p.stock || p.stock <= 0) ? 'disabled' : ''}>
+                ${(!p.stock || p.stock <= 0) ? 'Нет в наличии' : 'В корзину'}
+              </button>
+            </div>
+          `).join('')
+        : '<p style="text-align:center; padding:20px;">Ничего не найдено</p>';
+    }
+
+    function exitSearch() {
+      document.getElementById('search-input').value = '';
+      document.getElementById('search-input-top').value = '';
+      showScreen('home');
+    }
+
+    function addToCart(tempId) {
+      const product = allProducts.find(p => (p.id || p.name) === tempId);
+      if (!product) return;
+      
+      if ((product.stock || 0) <= 0) {
+        alert("Товар закончился!");
+        return;
+      }
+
+      const inCart = cart.filter(item => item.name === product.name).length;
+      if (inCart >= (product.stock || 0)) {
+        alert("Нельзя добавить больше, чем есть в наличии!");
+        return;
+      }
+
+      cart.push(product);
+      saveCart();
+      updateCartUI();
+    }
+
+    function removeFromCart(index) {
+      cart.splice(index, 1);
+      saveCart();
+      renderCart();
+      updateCartUI();
+    }
+
+    function saveCart() {
+      localStorage.setItem('cart', JSON.stringify(cart));
+    }
+
+    function updateCartUI() {
+      const count = cart.length;
+      const total = cart.reduce((sum, item) => sum + (item.price || 0), 0);
+      document.getElementById('cart-count').textContent = count;
+      document.getElementById('cart-total').textContent = total.toFixed(2);
+      document.getElementById('cart-btn').classList.toggle('show', count > 0);
+    }
+
+    function renderCart() {
+      const container = document.getElementById('cart-items');
+      if (cart.length === 0) {
+        container.innerHTML = '<p>Корзина пуста</p>';
+        return;
+      }
+      container.innerHTML = cart.map((item, index) => `
+        <div style="padding: 10px 0; border-bottom:1px solid #eee;">
+          <div><strong>${item.name}</strong></div>
+          <div>${parseFloat(item.price).toFixed(2)} BYN</div>
+          <button class="btn" style="background:#f44336; margin-top:6px;" onclick="removeFromCart(${index})">Удалить</button>
+        </div>
+      `).join('');
+      const total = cart.reduce((sum, item) => sum + (item.price || 0), 0);
+      document.getElementById('cart-total').textContent = total.toFixed(2);
+    }
+
+    function sendOrder() {
+      if (cart.length === 0) return;
+      
+      // Проверка остатков
+      const stockCount = {};
+      cart.forEach(item => {
+        stockCount[item.name] = (stockCount[item.name] || 0) + 1;
+      });
+      
+      const outOfStock = cart.filter(item => 
+        stockCount[item.name] > (allProducts.find(p => p.name === item.name)?.stock || 0)
+      );
+      
+      if (outOfStock.length > 0) {
+        alert("Некоторые товары закончились. Обновите страницу.");
+        return;
+      }
+
+      const user = Telegram.WebApp.initDataUnsafe?.user;
+      const username = user?.username ? `@${user.username}` : (user?.first_name || "Аноним");
+      const orderText = cart.map(item => `- ${item.name} — ${parseFloat(item.price).toFixed(2)} BYN`).join('\n');
+      const total = cart.reduce((sum, item) => sum + (item.price || 0), 0);
+
+      const message = `
+📦 НОВЫЙ ЗАКАЗ!
+👤 ${username}
+🛒 Товары:
+${orderText}
+💰 Итого: ${total.toFixed(2)} BYN
+      `.trim();
+
+      fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ chat_id: YOUR_CHAT_ID, text: message })
+      });
+
+      fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          chat_id: user?.id,
+          text: "✅ Ваш заказ оформлен! Ожидайте сообщения от продавца."
+        })
+      });
+
+      alert("Заказ отправлен!");
+      cart = [];
+      saveCart();
+      updateCartUI();
+      showScreen('home');
+    }
+
+    document.querySelectorAll('.tab').forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (isSearchMode) exitSearch();
+        document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        currentCategory = btn.dataset.tab;
+        renderProducts();
+      });
+    });
+
+    Telegram.WebApp.ready();
+    Telegram.WebApp.expand();
+    loadProducts();
+  </script>
+</body>
+</html>
